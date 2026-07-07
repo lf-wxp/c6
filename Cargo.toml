@@ -1,0 +1,93 @@
+[package]
+edition = "2024"
+name = "c6"
+rust-version = "1.88"
+version = "0.1.0"
+
+[[bin]]
+name = "c6"
+path = "./src/bin/main.rs"
+test = false
+
+[[test]]
+harness = false
+name = "hello_test"
+
+[lib]
+test = false
+
+[dependencies]
+esp-hal = {version = "~1.1.0", features = ["defmt", "esp32c6", "unstable"]}
+
+esp-rtos = {version = "0.3.0", features = [
+  "defmt",
+  "embassy",
+  "esp-alloc",
+  "esp-radio",
+  "esp32c6",
+]}
+
+defmt = "1.0.1"
+esp-bootloader-esp-idf = {version = "0.5.0", features = ["defmt", "esp32c6"]}
+
+embassy-net = {version = "0.9.1", features = [
+  "defmt",
+  "dhcpv4",
+  "medium-ethernet",
+  "tcp",
+  "udp",
+]}
+embedded-io = {version = "0.7.1", features = ["defmt"]}
+embedded-io-async = {version = "0.7.0", features = ["defmt"]}
+esp-alloc = {version = "0.10.0", features = ["defmt"]}
+panic-rtt-target = {version = "0.2.0", features = ["defmt"]}
+rtt-target = {version = "0.6.2", features = ["defmt"]}
+# for more networking protocol support see https://crates.io/crates/edge-net
+bt-hci = "0.8.0"
+embassy-executor = {version = "0.10.0", features = ["defmt"]}
+embassy-time = {version = "0.5.0", features = ["defmt"]}
+esp-radio = {version = "0.18.0", features = [
+  "ble",
+  "coex",
+  "defmt",
+  "esp-alloc",
+  "esp32c6",
+  "unstable",
+  "wifi",
+]}
+smoltcp = {version = "0.13.0", default-features = false, features = [
+  "defmt",
+  "medium-ethernet",
+  "multicast",
+  "proto-dhcpv4",
+  "proto-dns",
+  "proto-ipv4",
+  "socket-dns",
+  "socket-icmp",
+  "socket-raw",
+  "socket-tcp",
+  "socket-udp",
+]}
+trouble-host = {version = "0.6.0", features = ["gatt"]}
+
+critical-section = "1.2.0"
+static_cell = "2.1.1"
+
+[dev-dependencies]
+embedded-test = {version = "0.7.1", features = [
+  "defmt",
+  "embassy-010",
+  "external-executor",
+]}
+
+# For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
+[profile.dev]
+# The default debug profile is too slow and too big for resource-constrained devices.
+# Always build with some optimizations enabled.
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1 # LLVM can perform better optimizations using a single thread
+debug = 2 # prefer slower builds but better debugging experience
+lto = 'fat' 
+opt-level = 's'
