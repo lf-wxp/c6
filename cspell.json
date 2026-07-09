@@ -1,21 +1,36 @@
 {
     "words": [
+        "autocfg",
+        "bitfield",
+        "bitflags",
+        "btuuid",
+        "bumpalo",
+        "bytemuck",
+        "byteorder",
         "codegen",
         "coex",
+        "corasick",
         "DEFMT",
         "dhcpv",
         "espflash",
         "ESPNOW",
         "heapless",
         "imac",
+        "memchr",
         "mipidsi",
         "MOSI",
+        "msvc",
         "pixelcolor",
         "preverify",
         "riscv",
         "rustflags",
+        "SCLK",
+        "SDCARD",
+        "sdmmc",
+        "shlex",
         "smoltcp",
         "Tembedded",
-        "timg"
+        "timg",
+        "UART"
     ]
 }

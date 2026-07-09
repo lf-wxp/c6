@@ -3,6 +3,7 @@
 //! 在设备正常工作前，逐项检测关键子系统是否可用：
 //! - Heap : 是否能分配一小段堆内存
 //! - Lcd  : LCD 是否成功初始化（由外部传入结果）
+//! - Sd   : SD 卡是否成功挂载（由外部传入结果，可选：无卡不阻塞）
 //! - Wifi : WiFi controller 是否成功创建（由外部传入结果）
 //! - Now  : ESP-NOW 收发器是否成功创建（由外部传入结果）
 //! - Codec: `controller-protocol` 编解码 loopback 是否 OK
@@ -24,6 +25,7 @@ use controller_protocol::{Frame, GamepadState, decode_frame, encode_frame};
 pub enum SelfTestItem {
   Heap,
   Lcd,
+  Sd,
   Wifi,
   EspNow,
   Codec,
@@ -31,12 +33,13 @@ pub enum SelfTestItem {
 }
 
 /// 项目总数，用于固定大小数组
-pub const ITEM_COUNT: usize = 6;
+pub const ITEM_COUNT: usize = 7;
 
 /// 全部项目按屏幕上从上到下的显示顺序
 pub const ALL_ITEMS: [SelfTestItem; ITEM_COUNT] = [
   SelfTestItem::Heap,
   SelfTestItem::Lcd,
+  SelfTestItem::Sd,
   SelfTestItem::Wifi,
   SelfTestItem::EspNow,
   SelfTestItem::Codec,
@@ -49,11 +52,19 @@ impl SelfTestItem {
     match self {
       Self::Heap => "HEAP  ",
       Self::Lcd => "LCD   ",
+      Self::Sd => "SDCARD",
       Self::Wifi => "WIFI  ",
       Self::EspNow => "ESPNOW",
       Self::Codec => "CODEC ",
       Self::Watch => "WATCH ",
     }
+  }
+
+  /// 该项失败是否应阻塞主流程
+  ///
+  /// SD 卡是**可选外设**，无卡也允许正常工作。
+  pub const fn is_critical(self) -> bool {
+    !matches!(self, Self::Sd)
   }
 }
 
@@ -95,7 +106,15 @@ impl SelfTestReport {
     self.items[idx]
   }
 
-  /// 是否已经至少有一项失败
+  /// 是否已经至少有一项**关键项**失败（SD 卡这种可选项不算）
+  pub fn any_critical_fail(&self) -> bool {
+    ALL_ITEMS
+      .iter()
+      .zip(self.items.iter())
+      .any(|(item, status)| item.is_critical() && status.is_fail())
+  }
+
+  /// 是否已经至少有一项失败（含可选项）
   pub fn any_fail(&self) -> bool {
     self.items.iter().any(|s| s.is_fail())
   }

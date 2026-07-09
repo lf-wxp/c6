@@ -23,6 +23,7 @@
 [🔌 硬件接线](#-硬件与接线) ·
 [🏗 软件架构](#-软件架构) ·
 [🩺 POST 自检](#-post-自检) ·
+[🔐 依赖注入密钥](#-依赖注入密钥) ·
 [⚡ 快速开始](#-快速开始) ·
 [❓ FAQ](#-常见问题)
 
@@ -50,19 +51,31 @@
 
 ## 📑 目录
 
-- [📌 项目简介](#-项目简介)
-- [✨ 功能特性](#-功能特性)
-- [🔌 硬件与接线](#-硬件与接线)
-- [🏗 软件架构](#-软件架构)
-- [🩺 POST 自检](#-post-自检)
-- [🔐 依赖注入密钥](#-依赖注入密钥)
-- [⚡ 快速开始](#-快速开始)
-- [🛠 构建 / 烧录 / 运行](#-构建--烧录--运行)
-- [📁 目录结构](#-目录结构)
-- [❓ 常见问题](#-常见问题)
-- [🤝 贡献](#-贡献)
-- [🙏 致谢](#-致谢)
-- [📄 License](#-license)
+- [🎮 c6](#-c6)
+    - [ESP32-C6 Controller Receiver · ESP-NOW · ST7789 LCD](#esp32-c6-controller-receiver--esp-now--st7789-lcd)
+  - [📌 项目简介](#-项目简介)
+  - [📑 目录](#-目录)
+  - [✨ 功能特性](#-功能特性)
+    - [🖼 UI 组件详解](#-ui-组件详解)
+  - [🔌 硬件与接线](#-硬件与接线)
+  - [🏗 软件架构](#-软件架构)
+    - [🔄 数据流](#-数据流)
+    - [⏱ 时序图](#-时序图)
+  - [🩺 POST 自检](#-post-自检)
+  - [� SD 卡](#-sd-卡)
+    - [使用注意](#使用注意)
+  - [�🔐 依赖注入密钥](#-依赖注入密钥)
+  - [⚡ 快速开始](#-快速开始)
+  - [🛠 构建 / 烧录 / 运行](#-构建--烧录--运行)
+      - [🔍 检查与格式化](#-检查与格式化)
+      - [🔨 构建](#-构建)
+      - [📥 烧录与调试](#-烧录与调试)
+      - [🧪 CI](#-ci)
+  - [📁 目录结构](#-目录结构)
+  - [❓ 常见问题](#-常见问题)
+  - [🤝 贡献](#-贡献)
+  - [🙏 致谢](#-致谢)
+  - [📄 License](#-license)
 
 ---
 
@@ -70,14 +83,15 @@
 
 | 模块 | 能力 | 状态 |
 |---|---|:-:|
-| 🩺 POST 自检 | Heap / LCD / Codec / Wifi / EspNow / Watch 六项子系统健康度可视化 | ✅ |
+| 🩺 POST 自检 | Heap / LCD / **SD** / Codec / Wifi / EspNow / Watch 七项子系统健康度可视化 | ✅ |
 | 📡 ESP-NOW 接收 | 自动匹配 21B `Frame`，非本协议报文静默丢弃 | ✅ |
 | 🛡 协议校验 | CRC-16 校验、magic / 版本校验、seq gap 检测（丢包计数） | ✅ |
 | 🖼 实时渲染 | 按键 / 摇杆 / 旋钮全字段实时刷屏 | ✅ |
 | 💧 兜底刷新 | 500ms 兜底重绘，永远不会"卡屏" | ✅ |
 | 🔊 声光反馈 | RGB LED / 蜂鸣器状态提示 | 🚧 |
 | 📥 Command 下发 | Host → 手柄反向控制通道 | 🚧 |
-| 💾 SD 卡持久化 | 录制回放 / 配置保存 | 🚧 |
+| 💾 SD 卡读取 | 挂载 FAT16/FAT32、枚举根目录、按需读文件 | ✅ |
+| 💾 SD 卡录制回放 | 把 `Frame` 流写入 SD 卡以供离线回放 | 🚧 |
 
 ### 🖼 UI 组件详解
 
@@ -120,7 +134,9 @@
 | 💡 **LED** | RGB / WS2812 | `GPIO8` | 当前未使用 |
 | 🔌 **USB** | D- / D+ | `GPIO12` / `GPIO13` | 硬件保留 |
 | 📞 **UART0** | TX / RX | `GPIO16` / `GPIO17` | 串口 |
-| 💽 **SD** | CS / MISO | `GPIO4` / `GPIO5` | 当前未初始化 |
+| 💽 **SD** | CS | `GPIO4` | 独立片选 |
+| 💽 **SD** | MISO | `GPIO5` | SD 专用，LCD 不接 |
+| 💽 **SD** | MOSI / SCLK | `GPIO6` / `GPIO7` | **与 LCD 共用** |
 
 </details>
 
@@ -202,17 +218,18 @@ sequenceDiagram
 
 ## 🩺 POST 自检
 
-上电后、进入主循环前，**逐项走完六项子系统自检**，每完成一项即刷屏。
-**任一项失败会永久停在自检页并报警**，避免设备"看似正常但没数据"的疑难症状。
-
+上电后、进入主循环前，**逐项走完七项子系统自检**，每完成一项即刷屏。
+**关键项失败会永久停在自检页并报警**（SD 卡为可选项，失败不阻塞），避免设备“看似正常但没数据”的疑难症状。
 | # | 项目 | 检测方式 | 失败原因示例 |
 |:-:|:--|:--|:--|
 | 1️⃣ | 🧠 `HEAP` | `Vec::with_capacity(512)` 分配是否成功 | `alloc<512B` |
 | 2️⃣ | 🖥 `LCD` | 走到 render 阶段即认为 OK | — |
-| 3️⃣ | 🔐 `CODEC` | `encode_frame → decode_frame` 环回<br/>（间接验证 CRC / HMAC / 密钥） | `decode err` |
-| 4️⃣ | 📡 `WIFI` | `esp_radio::wifi::new` 返回值 | `init err` |
-| 5️⃣ | 📻 `ESPNOW` | `interfaces.esp_now.split()` | — |
-| 6️⃣ | 📬 `WATCH` | `Watch::receiver()` 能拿到订阅槽位 | `no slot` |
+| 3️⃣ | 💽 `SDCARD` ⚠ | `SdCard::num_bytes` + FAT `open_volume` | `no card` / `no FAT` |
+| 4️⃣ | 🔐 `CODEC` | `encode_frame → decode_frame` 环回<br/>（间接验证 CRC / HMAC / 密钥） | `decode err` |
+| 5️⃣ | 📡 `WIFI` | `esp_radio::wifi::new` 返回值 | `init err` |
+| 6️⃣ | 📻 `ESPNOW` | `interfaces.esp_now.split()` | — |
+| 7️⃣ | 📬 `WATCH` | `Watch::receiver()` 能拿到订阅槽位 | `no slot` |
+> ⚠ **带⚠的项为可选**：SD 卡失败仅作屏幕警示，不阻塞主流程；其余项失败则停机。
 
 <details>
 <summary><b>🖼 自检界面示意</b></summary>
@@ -223,6 +240,7 @@ sequenceDiagram
 ├────────────────────────────┤
 │ HEAP    [ OK ]             │
 │ LCD     [ OK ]             │
+│ SDCARD  [ OK ]  8192 MiB   │
 │ CODEC   [ OK ]             │
 │ WIFI    [ OK ]             │
 │ ESPNOW  [ OK ]             │
@@ -236,7 +254,39 @@ sequenceDiagram
 
 ---
 
-## 🔐 依赖注入密钥
+## � SD 卡
+
+**硬件层**：SD 卡与 LCD **共用** `SPI2` 的 `MOSI(GPIO6) / SCLK(GPIO7)`，
+自己的独有引脚为 `MISO(GPIO5) / CS(GPIO4)`。
+
+**软件层**：使用 [`embedded-sdmmc`](https://crates.io/crates/embedded-sdmmc) 0.9
+提供 FAT16 / FAT32 支持。为让 LCD 与 SD 共享同一条 `SpiBus`，采用了
+`embedded_hal_bus::spi::RefCellDevice`：
+
+```rust
+static SPI_BUS: StaticCell<RefCell<Spi<'static, Blocking>>> = StaticCell::new();
+let spi_bus = SPI_BUS.init(RefCell::new(spi));
+
+// LCD 从共享总线借一路 SpiDevice
+let lcd_spi = RefCellDevice::new(spi_bus, lcd_cs, Delay::new())?;
+
+// SD 卡从同一总线借另一路
+let sd_spi = RefCellDevice::new(spi_bus, sd_cs, Delay::new())?;
+let sd    = embedded_sdmmc::SdCard::new(sd_spi, Delay::new());
+```
+
+> ⚠️ **共享总线频率折中**：目前总线频率取 20 MHz（SD 卡上限 25 MHz、LCD 上限
+> 40 MHz 的稳妥交集）。如需极致 LCD 刷新率可拆到不同 SPI 外设。
+
+### 使用注意
+
+- SD 卡必须格式化为 **FAT16 / FAT32**（其它文件系统不支持）
+- 未插卡启动完全允许，自检页会显示 `SDCARD [FAIL] no card` 但不停机
+- SD 卡访问是**阻塞**的，如需在主循环使用请放到独立 task 避免影响渲染
+
+---
+
+## �🔐 依赖注入密钥
 
 `controller-protocol` 关闭了 `embed-default-secrets`，**必须**通过编译期环境变量注入 HMAC 密钥（32 字节 UTF-8 字符串）。
 在 [`.cargo/config.toml`](.cargo/config.toml) 的 `[env]` 段配置：
@@ -335,6 +385,7 @@ c6/
 │   ├── lib.rs              # 模块导出
 │   ├── display.rs          # 🎨 LCD 渲染（ViewModel / render / render_self_test）
 │   ├── radio.rs            # 📡 ESP-NOW 接收 task + Watch 通道类型
+│   ├── sdcard.rs           # 💽 SD 卡 TimeSource / 辅助日志
 │   └── self_test.rs        # 🩺 POST 自检核心
 ├── 📂 tests/
 │   └── hello_test.rs       # embedded-test 占位（当前 [[test]] harness = false）
@@ -396,6 +447,32 @@ cargo clippy --lib --bins -- -D warnings
 
 </details>
 
+<details>
+<summary><b>💽 Q5: SD 卡插入但自检报 <code>SDCARD [FAIL] no card</code>?</b></summary>
+
+排查步骤：
+
+1. 确认 SD 卡已格式化为 **FAT16 / FAT32**（不支持 exFAT / NTFS）
+2. 确认接线：`MISO=GPIO5` / `CS=GPIO4` / `MOSI=GPIO6` / `SCLK=GPIO7`
+3. 部分老 SD 卡对 3.3V 供电敏感，建议探测主板供电能力
+4. 尝试调低 SPI 总线频率，在 [`main.rs`](src/bin/main.rs) 里将
+   `Rate::from_mhz(20)` 改为 `Rate::from_mhz(4)` 后再试
+
+</details>
+
+<details>
+<summary><b>💽 Q6: <code>SDCARD [FAIL] no FAT</code> 是什么意思？</b></summary>
+
+SD 卡硬件握手成功但未发现可识别的 FAT 分区，常见原因：
+
+- 未格式化（新卡）
+- 格式化为 exFAT / NTFS / ext4
+- 分区表损坏
+
+用 SD Card Formatter 或 `mkfs.vfat -F 32 /dev/sdX` 重新格式化为 FAT32 即可。
+
+</details>
+
 ---
 
 ## 🤝 贡献
@@ -419,6 +496,7 @@ cargo make ci    # fmt-check + clippy + build + release
 - 🎨 [**mipidsi**](https://github.com/almindor/mipidsi) — ST7789 驱动
 - 🖼 [**embedded-graphics**](https://github.com/embedded-graphics/embedded-graphics) — 嵌入式 2D 渲染
 - 🎮 [**controller-protocol**](https://github.com/lf-wxp/controller) — 手柄协议定义
+- 💽 [**embedded-sdmmc**](https://github.com/rust-embedded-community/embedded-sdmmc-rs) — FAT16 / FAT32 SD 卡驱动
 - 📡 [**probe-rs**](https://probe.rs/) — 一站式嵌入式调试工具链
 
 ---

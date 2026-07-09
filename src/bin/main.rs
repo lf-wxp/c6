@@ -7,15 +7,18 @@
 )]
 #![deny(clippy::large_stack_frames)]
 
-use c6::display::{SCREEN_H, SCREEN_W, ViewModel, render, render_self_test};
+use c6::display::{SCREEN_H, SCREEN_W, ViewModel, render};
+use c6::post;
 use c6::radio::{StateWatch, recv_task};
+use c6::sdcard;
 use c6::self_test::{
   SelfTestItem, SelfTestReport, SelfTestStatus, run_codec_check, run_heap_check,
 };
+use core::cell::RefCell;
 use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
-use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_hal_bus::spi::RefCellDevice;
 use esp_hal::{
   clock::CpuClock,
   delay::Delay,
@@ -46,6 +49,11 @@ esp_bootloader_esp_idf::esp_app_desc!();
 static STATE_WATCH: StaticCell<StateWatch> = StaticCell::new();
 /// mipidsi SpiInterface 内部需要一个字节缓冲区，用于批量像素写入
 static DISPLAY_BUF: StaticCell<[u8; 1024]> = StaticCell::new();
+/// 共享 SPI 总线（LCD + SD 卡复用）；`RefCell` 提供内部可变性，
+/// 由 `embedded-hal-bus::spi::RefCellDevice` 在使用时借出。
+///
+/// 用 `StaticCell` 提升到 `'static`，让 `RefCellDevice<'static, ..>` 能贯穿整个 main 生命周期。
+static SPI_BUS: StaticCell<RefCell<Spi<'static, esp_hal::Blocking>>> = StaticCell::new();
 
 #[allow(
   clippy::large_stack_frames,
@@ -73,34 +81,45 @@ async fn main(spawner: Spawner) -> ! {
   info!("Embassy initialized!");
 
   // -----------------------------------------------------------------
-  // LCD (SPI2)：MOSI=GPIO6, CLK=GPIO7, CS=GPIO14, DC=GPIO15, RES=GPIO21, BL=GPIO22
+  // SPI2：LCD + SD 共用同一条总线
+  //
+  // 引脚：MOSI=GPIO6 / SCLK=GPIO7 / MISO=GPIO5（SD 用）；
+  // 频率取 LCD 与 SD 共同上限的稳妥值 20 MHz。
   // -----------------------------------------------------------------
   let spi = Spi::new(
     peripherals.SPI2,
     SpiConfig::default()
-      .with_frequency(Rate::from_mhz(40))
+      .with_frequency(Rate::from_mhz(20))
       .with_mode(SpiMode::_0),
   )
   .expect("spi cfg")
   .with_sck(peripherals.GPIO7)
-  .with_mosi(peripherals.GPIO6);
+  .with_mosi(peripherals.GPIO6)
+  .with_miso(peripherals.GPIO5);
 
-  let cs = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
-  let dc = Output::new(peripherals.GPIO15, Level::Low, OutputConfig::default());
-  let rst = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
+  // 把 SPI 提升到 'static，交给 RefCell 让 LCD / SD 分时复用
+  let spi_bus: &'static RefCell<Spi<'static, esp_hal::Blocking>> = SPI_BUS.init(RefCell::new(spi));
+
+  // 各设备的 CS / DC / RES / BL
+  let lcd_cs = Output::new(peripherals.GPIO14, Level::High, OutputConfig::default());
+  let lcd_dc = Output::new(peripherals.GPIO15, Level::Low, OutputConfig::default());
+  let lcd_rst = Output::new(peripherals.GPIO21, Level::High, OutputConfig::default());
   let mut backlight = Output::new(peripherals.GPIO22, Level::Low, OutputConfig::default());
+  let sd_cs = Output::new(peripherals.GPIO4, Level::High, OutputConfig::default());
 
-  // ExclusiveDevice 把 SpiBus + CS 组合成 SpiDevice
-  let spi_device = ExclusiveDevice::new(spi, cs, Delay::new()).expect("spi device");
+  // -----------------------------------------------------------------
+  // LCD：从共享总线借一路 SpiDevice + 独占 CS
+  // -----------------------------------------------------------------
+  let lcd_spi = RefCellDevice::new(spi_bus, lcd_cs, Delay::new()).expect("lcd spi device");
   let buffer: &'static mut [u8; 1024] = DISPLAY_BUF.init([0_u8; 1024]);
 
-  let di = SpiInterface::new(spi_device, dc, buffer);
+  let di = SpiInterface::new(lcd_spi, lcd_dc, buffer);
   let mut delay = Delay::new();
   let mut display = Builder::new(ST7789, di)
     .display_size(SCREEN_W, SCREEN_H)
     .orientation(Orientation::new().rotate(Rotation::Deg0))
     .invert_colors(ColorInversion::Inverted)
-    .reset_pin(rst)
+    .reset_pin(lcd_rst)
     .init(&mut delay)
     .expect("lcd init");
 
@@ -109,81 +128,101 @@ async fn main(spawner: Spawner) -> ! {
   info!("LCD initialized (240x240 ST7789)");
 
   // -----------------------------------------------------------------
-  // 自检 (POST) — 阶段 1：Heap / LCD / Codec
+  // 自检 (POST)
   // -----------------------------------------------------------------
   let mut report = SelfTestReport::new();
 
   // 初始画面（全部 pending）
-  if render_self_test(&mut display, &report).is_err() {
-    warn!("render_self_test error");
-  }
+  post::refresh(&mut display, &report).await;
 
-  // Heap
-  report.mark(SelfTestItem::Heap, run_heap_check());
-  let _ = render_self_test(&mut display, &report);
-  Timer::after(Duration::from_millis(120)).await;
+  // 阶段 1：Heap / LCD / Codec
+  post::step(
+    &mut display,
+    &mut report,
+    SelfTestItem::Heap,
+    run_heap_check(),
+  )
+  .await;
+  post::step(
+    &mut display,
+    &mut report,
+    SelfTestItem::Lcd,
+    SelfTestStatus::Ok,
+  )
+  .await;
+  post::step(
+    &mut display,
+    &mut report,
+    SelfTestItem::Codec,
+    run_codec_check(),
+  )
+  .await;
 
-  // LCD（走到这一步说明 LCD 已经能刷新 → OK）
-  report.mark(SelfTestItem::Lcd, SelfTestStatus::Ok);
-  let _ = render_self_test(&mut display, &report);
-  Timer::after(Duration::from_millis(120)).await;
+  // SD 卡（可选外设：无卡不阻塞主流程）
+  let sd_spi = RefCellDevice::new(spi_bus, sd_cs, Delay::new()).expect("sd spi device");
+  let (sd_status, _sd_info) = sdcard::try_mount(sd_spi, Delay::new());
+  post::step(&mut display, &mut report, SelfTestItem::Sd, sd_status).await;
 
-  // Codec loopback（依赖 controller-protocol 编解码，能间接检查密钥是否已注入）
-  report.mark(SelfTestItem::Codec, run_codec_check());
-  let _ = render_self_test(&mut display, &report);
-  Timer::after(Duration::from_millis(120)).await;
-
-  // -----------------------------------------------------------------
-  // WiFi + ESP-NOW
-  // -----------------------------------------------------------------
-  let (mut _wifi_controller, interfaces) = match esp_radio::wifi::new(peripherals.WIFI, Default::default()) {
-    Ok(pair) => {
-      report.mark(SelfTestItem::Wifi, SelfTestStatus::Ok);
-      let _ = render_self_test(&mut display, &report);
-      pair
-    }
-    Err(e) => {
-      warn!("wifi init failed: {:?}", defmt::Debug2Format(&e));
-      report.mark(SelfTestItem::Wifi, SelfTestStatus::Fail("init err"));
-      // WiFi 是硬依赖，画完自检页后停在这里
-      let _ = render_self_test(&mut display, &report);
-      loop {
-        Timer::after(Duration::from_secs(1)).await;
+  // WiFi
+  let (mut _wifi_controller, interfaces) =
+    match esp_radio::wifi::new(peripherals.WIFI, Default::default()) {
+      Ok(pair) => {
+        post::step(
+          &mut display,
+          &mut report,
+          SelfTestItem::Wifi,
+          SelfTestStatus::Ok,
+        )
+        .await;
+        pair
       }
-    }
-  };
-  Timer::after(Duration::from_millis(120)).await;
+      Err(e) => {
+        warn!("wifi init failed: {:?}", defmt::Debug2Format(&e));
+        post::step(
+          &mut display,
+          &mut report,
+          SelfTestItem::Wifi,
+          SelfTestStatus::Fail("init err"),
+        )
+        .await;
+        // WiFi 是硬依赖，画完自检页后停在这里
+        loop {
+          Timer::after(Duration::from_secs(1)).await;
+        }
+      }
+    };
 
   // ESP-NOW split（当前 API 不返回 Result，能拿到 receiver 即 OK）
   let (_manager, _sender, receiver) = interfaces.esp_now.split();
-  report.mark(SelfTestItem::EspNow, SelfTestStatus::Ok);
-  let _ = render_self_test(&mut display, &report);
-  Timer::after(Duration::from_millis(120)).await;
+  post::step(
+    &mut display,
+    &mut report,
+    SelfTestItem::EspNow,
+    SelfTestStatus::Ok,
+  )
+  .await;
 
-  // -----------------------------------------------------------------
-  // 拉起接收 task
-  // -----------------------------------------------------------------
+  // Watch 通道：探测一次 receiver 可用性
   let watch: &'static StateWatch = STATE_WATCH.init(StateWatch::new());
-  // 尝试拿一个 receiver 验证通道可用（探测后立即 drop，避免占用 WATCH_CONSUMERS 名额）
-  match watch.receiver() {
-    Some(_probe) => {
-      report.mark(SelfTestItem::Watch, SelfTestStatus::Ok);
-    }
-    None => {
-      report.mark(SelfTestItem::Watch, SelfTestStatus::Fail("no slot"));
-    }
-  }
-  let _ = render_self_test(&mut display, &report);
-  Timer::after(Duration::from_millis(120)).await;
+  let watch_status = if watch.receiver().is_some() {
+    SelfTestStatus::Ok
+  } else {
+    SelfTestStatus::Fail("no slot")
+  };
+  post::step(&mut display, &mut report, SelfTestItem::Watch, watch_status).await;
 
   // 自检结果汇总
-  if report.any_fail() {
-    warn!("self-test FAILED, halting");
+  if report.any_critical_fail() {
+    warn!("self-test FAILED (critical), halting");
     loop {
       Timer::after(Duration::from_secs(1)).await;
     }
   }
-  info!("self-test ALL OK");
+  if report.any_fail() {
+    info!("self-test finished with non-critical warnings");
+  } else {
+    info!("self-test ALL OK");
+  }
   // 让用户看清 "ALL OK" 之后再进入正常界面
   Timer::after(Duration::from_millis(600)).await;
 
@@ -195,7 +234,7 @@ async fn main(spawner: Spawner) -> ! {
   let mut receiver_ch = watch.receiver().expect("watch receiver");
   let mut last_vm = ViewModel::empty();
   // 先画一次初始 (WAIT) 画面
-  if let Err(_e) = render(&mut display, &last_vm) {
+  if render(&mut display, &last_vm).is_err() {
     warn!("render error at boot");
   }
 

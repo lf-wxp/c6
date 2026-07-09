@@ -370,7 +370,13 @@ where
   } else {
     ("TESTING...", ACCENT)
   };
-  draw_text(display, summary, Point::new(8, summary_y + 6), summary_color, true)?;
+  draw_text(
+    display,
+    summary,
+    Point::new(8, summary_y + 6),
+    summary_color,
+    true,
+  )?;
 
   Ok(())
 }
