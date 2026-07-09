@@ -1,8 +1,21 @@
 {
     "words": [
+        "codegen",
+        "coex",
+        "DEFMT",
+        "dhcpv",
+        "espflash",
+        "ESPNOW",
+        "heapless",
         "imac",
+        "mipidsi",
+        "MOSI",
+        "pixelcolor",
         "preverify",
         "riscv",
-        "Tembedded"
+        "rustflags",
+        "smoltcp",
+        "Tembedded",
+        "timg"
     ]
 }

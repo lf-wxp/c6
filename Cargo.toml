@@ -51,6 +51,7 @@ esp-radio = {version = "0.18.0", features = [
   "coex",
   "defmt",
   "esp-alloc",
+  "esp-now",
   "esp32c6",
   "unstable",
   "wifi",
@@ -72,6 +73,19 @@ trouble-host = {version = "0.6.0", features = ["gatt"]}
 
 critical-section = "1.2.0"
 static_cell = "2.1.1"
+
+# 关掉 embed-default-secrets，强制注入真密钥；仅启用 defmt::Format 集成
+controller-protocol = {git = "https://github.com/lf-wxp/controller", tag = "protocol-v0.1.0", default-features = false, features = ["defmt"]}
+
+# LCD 驱动（ST7789 / 240x240 SPI 屏，正方形 1.3 寸屏）
+mipidsi = {version = "0.10.0", default-features = false, features = ["defmt"]}
+embedded-graphics = "0.8.2"
+embedded-hal = "1.0.0"
+embedded-hal-bus = {version = "0.3.0", features = ["defmt-03"]}
+
+# Inter-task 通道
+embassy-sync = {version = "0.7.2", features = ["defmt"]}
+embassy-futures = "0.1.2"
 
 [dev-dependencies]
 embedded-test = {version = "0.7.1", features = [

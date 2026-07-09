@@ -1,0 +1,179 @@
+# ==============================================================================
+# cargo-make 任务定义 —— ESP32-C6 (riscv32imac-unknown-none-elf) 项目
+# ==============================================================================
+#
+# 常用命令：
+#   cargo make                # 默认：check
+#   cargo make build          # dev 构建
+#   cargo make release        # release 构建
+#   cargo make check          # cargo check（dev）
+#   cargo make clippy         # 代码规范检查
+#   cargo make fmt            # 格式化
+#   cargo make fmt-check      # 只校验格式，不写入
+#   cargo make lint           # fmt-check + clippy
+#   cargo make flash          # 通过 espflash 烧录（release）
+#   cargo make run            # 通过 probe-rs 烧录并运行（release，带 defmt 日志）
+#   cargo make run-dev        # 同 run 但用 dev profile
+#   cargo make monitor        # 只做串口 monitor
+#   cargo make erase          # 擦除整片 flash
+#   cargo make size           # 展示 release 产物 size
+#   cargo make clean          # cargo clean
+#   cargo make ci             # fmt-check + clippy + build + release
+# ==============================================================================
+
+[config]
+# 一些默认行为
+default_to_workspace = false
+skip_core_tasks = true
+min_version = "0.37.0"
+
+[env]
+# 目标三元组（也在 .cargo/config.toml 里配置了，这里再显式声明供部分任务使用）
+TARGET = "riscv32imac-unknown-none-elf"
+# 芯片型号，供 espflash / probe-rs 使用
+CHIP = "esp32c6"
+# 二进制名（与 Cargo.toml 中 [[bin]] name 保持一致）
+BIN_NAME = "c6"
+
+# ------------------------------------------------------------------------------
+# 基础构建
+# ------------------------------------------------------------------------------
+
+[tasks.default]
+alias = "check"
+
+[tasks.check]
+description = "cargo check（dev profile）"
+category = "Build"
+command = "cargo"
+args = ["check"]
+
+[tasks.check-release]
+description = "cargo check（release profile）"
+category = "Build"
+command = "cargo"
+args = ["check", "--release"]
+
+[tasks.build]
+description = "dev 构建"
+category = "Build"
+command = "cargo"
+args = ["build"]
+
+[tasks.release]
+description = "release 构建"
+category = "Build"
+command = "cargo"
+args = ["build", "--release"]
+
+[tasks.clean]
+description = "cargo clean"
+category = "Build"
+command = "cargo"
+args = ["clean"]
+
+# ------------------------------------------------------------------------------
+# 代码质量
+# ------------------------------------------------------------------------------
+
+[tasks.fmt]
+description = "格式化代码"
+category = "Lint"
+command = "cargo"
+args = ["fmt", "--all"]
+
+[tasks.fmt-check]
+description = "校验格式（不写入）"
+category = "Lint"
+command = "cargo"
+args = ["fmt", "--all", "--", "--check"]
+
+[tasks.clippy]
+description = "clippy 静态检查（-D warnings，仅 lib + bins；tests 由 embedded-test 单独跑）"
+category = "Lint"
+command = "cargo"
+args = ["clippy", "--lib", "--bins", "--", "-D", "warnings"]
+
+[tasks.lint]
+description = "fmt-check + clippy"
+category = "Lint"
+dependencies = ["fmt-check", "clippy"]
+
+# ------------------------------------------------------------------------------
+# 烧录 / 运行
+# ------------------------------------------------------------------------------
+
+[tasks.flash]
+description = "使用 espflash 将 release 版本烧录到芯片（不进入 monitor）"
+category = "Device"
+dependencies = ["release"]
+command = "espflash"
+args = [
+  "flash",
+  "--chip",
+  "${CHIP}",
+  "target/${TARGET}/release/${BIN_NAME}",
+]
+
+[tasks.flash-monitor]
+description = "espflash 烧录并进入串口 monitor（release）"
+category = "Device"
+dependencies = ["release"]
+command = "espflash"
+args = [
+  "flash",
+  "--chip",
+  "${CHIP}",
+  "--monitor",
+  "target/${TARGET}/release/${BIN_NAME}",
+]
+
+[tasks.run]
+description = "使用 probe-rs 烧录并运行（release，带 defmt 日志）"
+category = "Device"
+command = "cargo"
+args = ["run", "--release"]
+
+[tasks.run-dev]
+description = "使用 probe-rs 烧录并运行（dev profile）"
+category = "Device"
+command = "cargo"
+args = ["run"]
+
+[tasks.monitor]
+description = "仅进入 espflash 串口 monitor（不烧录）"
+category = "Device"
+command = "espflash"
+args = ["monitor"]
+
+[tasks.erase]
+description = "擦除整片 flash（危险操作，慎用）"
+category = "Device"
+command = "espflash"
+args = ["erase-flash", "--chip", "${CHIP}"]
+
+# ------------------------------------------------------------------------------
+# 辅助
+# ------------------------------------------------------------------------------
+
+[tasks.size]
+description = "查看 release 产物的 section 大小"
+category = "Info"
+dependencies = ["release"]
+command = "cargo"
+args = ["size", "--release", "--", "-A"]
+
+[tasks.tree]
+description = "查看依赖树"
+category = "Info"
+command = "cargo"
+args = ["tree"]
+
+# ------------------------------------------------------------------------------
+# CI 组合任务
+# ------------------------------------------------------------------------------
+
+[tasks.ci]
+description = "CI 全流程：格式检查 + clippy + dev + release"
+category = "CI"
+dependencies = ["fmt-check", "clippy", "build", "release"]
