@@ -33,8 +33,8 @@
 
 ## 📌 项目简介
 
-`c6` 是一个 **端到端** 的嵌入式接收端参考实现：手柄侧通过 ESP-NOW 广播 21 字节
-[`controller-protocol`](https://github.com/lf-wxp/controller) `Frame`，
+`c6` 是一个 **端到端** 的嵌入式接收端参考实现：手柄侧通过 ESP-NOW 广播 25 字节
+[`controller-protocol`](https://github.com/lf-wxp/controller) **v0.2.0** `Frame`，
 `c6` 常驻监听并将其解码为 `ViewModel`，通过 `embassy_sync::Watch` 派发到 UI 协程实时刷屏。
 **零连接握手、亚毫秒级唤醒、单 crate 单 firmware**。
 
@@ -81,10 +81,15 @@
 
 ## ✨ 功能特性
 
+> **🆕 已适配 `controller-protocol` v0.2.0**（breaking）：帧长 21B → **25B**、
+> 新增 `dest_mask` 位图寻址、按键位从 4 键扩到 **6 键**（Btn1-4 + JoyBtn + Switch）、
+> `GamepadState.buttons` 由 `u8` → `u16`。上层 API（`FRAME_LEN` / `decode_frame`
+> / `Frame::new` / `GamepadState::EMPTY`）保持兼容，接入方**零改动**。
+
 | 模块 | 能力 | 状态 |
 |---|---|:-:|
 | 🩺 POST 自检 | Heap / LCD / **SD** / Codec / Wifi / EspNow / Watch 七项子系统健康度可视化 | ✅ |
-| 📡 ESP-NOW 接收 | 自动匹配 21B `Frame`，非本协议报文静默丢弃 | ✅ |
+| 📡 ESP-NOW 接收 | 自动匹配 25B `Frame`，非本协议报文静默丢弃 | ✅ |
 | 🛡 协议校验 | CRC-16 校验、magic / 版本校验、seq gap 检测（丢包计数） | ✅ |
 | 🖼 实时渲染 | 按键 / 摇杆 / 旋钮全字段实时刷屏 | ✅ |
 | 💧 兜底刷新 | 500ms 兜底重绘，永远不会"卡屏" | ✅ |
@@ -100,16 +105,16 @@
 │ [RECV] seq=1234  gap=0  ok=99 │  ← 顶部状态栏
 ├───────────────────────────────┤
 │                               │
-│     ┌─┐   ┌─┐   ┌─┐   ┌─┐     │  ← 4 按键（按下高亮）
-│     │A│   │B│   │X│   │Y│     │
-│     └─┘   └─┘   └─┘   └─┘     │
+│  ┌──┐┌──┐┌──┐┌──┐┌──┐┌──┐     │  ← 6 按键（B1-B4 + JB/SW）
+│  │B1││B2││B3││B4││JB││SW│     │      按下 = 绿色高亮
+│  └──┘└──┘└──┘└──┘└──┘└──┘     │
 │                               │
 │           ╭───╮               │
 │           │ • │  X=+128       │  ← 摇杆十字准星
 │           ╰───╯  Y=-064       │
 │                               │
-│     L ▓▓▓▓▓▓░░░░  0.65        │  ← 双旋钮进度条
-│     R ▓▓▓░░░░░░░  0.30        │
+│     K1 ▓▓▓▓▓▓░░░░  32768      │  ← 双旋钮进度条
+│     K2 ▓▓▓░░░░░░░  16384      │
 └───────────────────────────────┘
 ```
 
@@ -163,7 +168,7 @@ flowchart LR
 
     Watch[["📬 Watch&lt;ViewModel&gt;"]]
 
-    WIFI ==>|21B Frame| Recv
+    WIFI ==>|25B Frame| Recv
     Recv ==>|发布| Watch
     Watch ==>|订阅| Main
     Main ==>|绘制| LCD
@@ -197,7 +202,7 @@ sequenceDiagram
     participant LCD as 🖥 LCD
 
     loop 常驻监听
-        Radio->>Recv: 21B raw frame
+        Radio->>Recv: 25B raw frame
         Recv->>Recv: decode_frame + CRC/seq check
         alt 合法
             Recv->>W: send(ViewModel)
@@ -424,7 +429,7 @@ c6/
 <details>
 <summary><b>📡 Q3: 自检全通过，但屏上一直 <code>WAIT</code>？</b></summary>
 
-设备本身没问题，只是**没人在同一个 WiFi 信道上广播 21B Frame**。
+设备本身没问题，只是**没人在同一个 WiFi 信道上广播 25B Frame**。
 
 排查步骤：
 - ✅ 手柄端是否上电

@@ -1,6 +1,7 @@
 {
     "words": [
         "autocfg",
+        "autonumber",
         "bitfield",
         "bitflags",
         "btuuid",
@@ -14,16 +15,22 @@
         "dhcpv",
         "espflash",
         "ESPNOW",
+        "filt",
         "heapless",
+        "HMAC",
         "imac",
         "memchr",
         "mipidsi",
         "MOSI",
         "msvc",
+        "NTFS",
         "pixelcolor",
         "preverify",
+        "rerr",
         "riscv",
+        "rssi",
         "rustflags",
+        "rustup",
         "SCLK",
         "SDCARD",
         "sdmmc",
@@ -31,6 +38,7 @@
         "smoltcp",
         "Tembedded",
         "timg",
-        "UART"
+        "UART",
+        "vfat"
     ]
 }

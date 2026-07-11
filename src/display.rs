@@ -9,11 +9,12 @@
 //!   ┌──────────────────────────┐
 //!   │ RECV  seq=12345  gap=2   │  顶部状态行
 //!   ├──────────────────────────┤
-//!   │ Btn [1][2][3][4]         │  按钮方块
+//!   │ [B1][B2][B3][B4][JB][SW] │  6 键方块
 //!   │                          │
 //!   │ Joy ( +12000, -50 )      │  摇杆 + 十字准星
 //!   │                          │
 //!   │ Knob1 32768  Knob2 16384 │  两个旋钮进度条
+//!   │ id=0.  filt=0  rep=0     │  底部 peer 状态行
 //!   └──────────────────────────┘
 //! ```
 
@@ -21,12 +22,12 @@ use controller_protocol::{ButtonBits, GamepadState};
 use embedded_graphics::{
   mono_font::{
     MonoTextStyle,
-    ascii::{FONT_6X10, FONT_8X13_BOLD, FONT_10X20},
+    ascii::{FONT_6X10, FONT_8X13_BOLD},
   },
   pixelcolor::Rgb565,
   prelude::*,
   primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
-  text::{Alignment, Baseline, Text, TextStyleBuilder},
+  text::{Baseline, Text, TextStyleBuilder},
 };
 
 use crate::self_test::{ALL_ITEMS, SelfTestReport, SelfTestStatus};
@@ -54,6 +55,14 @@ pub struct ViewModel {
   pub gap_count: u32,
   /// 累计成功解码帧数
   pub ok_count: u32,
+  /// 累计被 `dest_mask` 过滤掉（收到但不是发给本机）的帧数
+  pub filtered_count: u32,
+  /// 本机当前 `receiver_id`（由手柄的 `AssignId` 命令下发，默认 0）
+  pub receiver_id: u8,
+  /// 是否已被手柄通过 `AssignId` 分配过 ID
+  pub assigned: bool,
+  /// 累计发出的 `AnnounceReply` 次数
+  pub reply_count: u32,
   /// 最近一帧的手柄状态
   pub state: GamepadState,
 }
@@ -65,6 +74,10 @@ impl ViewModel {
       last_seq: 0,
       gap_count: 0,
       ok_count: 0,
+      filtered_count: 0,
+      receiver_id: crate::peer::INITIAL_RECEIVER_ID,
+      assigned: false,
+      reply_count: 0,
       state: GamepadState::EMPTY,
     }
   }
@@ -104,25 +117,18 @@ where
   Ok(())
 }
 
-fn draw_big_number<D>(display: &mut D, s: &str, pos: Point, color: Rgb565) -> Result<(), D::Error>
+/// 画一个按钮方块：8x13 字号 + 边框；`width` 允许调用方按不同布局自适应
+fn draw_button<D>(
+  display: &mut D,
+  label: &str,
+  pos: Point,
+  width: u32,
+  pressed: bool,
+) -> Result<(), D::Error>
 where
   D: DrawTarget<Color = Rgb565>,
 {
-  let style = MonoTextStyle::new(&FONT_10X20, color);
-  let text_style = TextStyleBuilder::new()
-    .alignment(Alignment::Left)
-    .baseline(Baseline::Top)
-    .build();
-  Text::with_text_style(s, pos, style, text_style).draw(display)?;
-  Ok(())
-}
-
-/// 画一个按钮方块：8x13 字号 + 边框
-fn draw_button<D>(display: &mut D, label: &str, pos: Point, pressed: bool) -> Result<(), D::Error>
-where
-  D: DrawTarget<Color = Rgb565>,
-{
-  let size = Size::new(44, 32);
+  let size = Size::new(width, 32);
   let (bg, fg, border) = if pressed {
     (OK, BG, ACCENT)
   } else {
@@ -255,16 +261,28 @@ where
   let _ = core::fmt::write(&mut buf3, format_args!("ok={}", vm.ok_count));
   draw_text(display, buf3.as_str(), Point::new(190, 6), OFF, false)?;
 
-  // —— 按钮行 ——
-  let btn_defs: [(ButtonBits, &str); 4] = [
+  // —— 按钮行（6 键：Btn1-4 + JoyBtn + Switch）——
+  //   240 宽 = 8(左边距) + 6*btn_w + 5*gap + 8(右边距)
+  //   取 btn_w=36, gap=3 => 8 + 216 + 15 + 8 = 247，稍紧凑；改用 btn_w=34, gap=4 => 8+204+20+8=240
+  let btn_defs: [(ButtonBits, &str); 6] = [
     (ButtonBits::Btn1, "B1"),
     (ButtonBits::Btn2, "B2"),
     (ButtonBits::Btn3, "B3"),
     (ButtonBits::Btn4, "B4"),
+    (ButtonBits::JoyBtn, "JB"),
+    (ButtonBits::Switch, "SW"),
   ];
+  const BTN_W: u32 = 34;
+  const BTN_GAP: i32 = 4;
   for (i, (bit, label)) in btn_defs.iter().enumerate() {
-    let x = 8 + (i as i32) * 56;
-    draw_button(display, label, Point::new(x, 28), vm.state.is_pressed(*bit))?;
+    let x = 8 + (i as i32) * (BTN_W as i32 + BTN_GAP);
+    draw_button(
+      display,
+      label,
+      Point::new(x, 28),
+      BTN_W,
+      vm.state.is_pressed(*bit),
+    )?;
   }
 
   // —— 摇杆区域 ——
@@ -292,8 +310,26 @@ where
   let _ = core::fmt::write(&mut k2, format_args!("{}", vm.state.knob_2));
   draw_text(display, k2.as_str(), Point::new(32, 216), OFF, false)?;
 
-  // 用一下 big-number 引用，避免 dead_code
-  let _ = draw_big_number::<D>;
+  // —— 底部 peer 状态行（y=228~239）——
+  //
+  // 显示：本机 receiver_id、是否被手柄分配过、被 dest_mask 过滤的帧数、发出的 AnnounceReply 数
+  // 格式（示例）：`id=3*  filt=12  rep=2`；`*` 表示已被 AssignId 分配过（未分配显示 `.`）。
+  let mut peer = heapless_str::<48>();
+  let mark = if vm.assigned { '*' } else { '.' };
+  let _ = core::fmt::write(
+    &mut peer,
+    format_args!(
+      "id={}{}  filt={}  rep={}",
+      vm.receiver_id, mark, vm.filtered_count, vm.reply_count
+    ),
+  );
+  draw_text(
+    display,
+    peer.as_str(),
+    Point::new(4, 228),
+    if vm.assigned { OK } else { OFF },
+    false,
+  )?;
 
   Ok(())
 }

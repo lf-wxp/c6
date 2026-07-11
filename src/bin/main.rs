@@ -192,8 +192,15 @@ async fn main(spawner: Spawner) -> ! {
       }
     };
 
-  // ESP-NOW split（当前 API 不返回 Result，能拿到 receiver 即 OK）
-  let (_manager, _sender, receiver) = interfaces.esp_now.split();
+  // 读取本机 MAC-48（用于 AnnounceReply / AssignId 匹配）
+  let own_mac = interfaces.station.mac_address();
+  info!(
+    "station MAC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+    own_mac[0], own_mac[1], own_mac[2], own_mac[3], own_mac[4], own_mac[5]
+  );
+
+  // ESP-NOW split（当前 API 不返回 Result，能拿到 receiver / sender 即 OK）
+  let (_manager, esp_now_sender, esp_now_receiver) = interfaces.esp_now.split();
   post::step(
     &mut display,
     &mut report,
@@ -226,7 +233,8 @@ async fn main(spawner: Spawner) -> ! {
   // 让用户看清 "ALL OK" 之后再进入正常界面
   Timer::after(Duration::from_millis(600)).await;
 
-  spawner.spawn(recv_task(receiver, watch).expect("build recv_task"));
+  spawner
+    .spawn(recv_task(esp_now_receiver, esp_now_sender, own_mac, watch).expect("spawn recv_task"));
 
   // -----------------------------------------------------------------
   // 渲染主循环：订阅 Watch，收到就重画
