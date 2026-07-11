@@ -91,7 +91,12 @@
 | 🩺 POST 自检 | Heap / LCD / **SD** / Codec / Wifi / EspNow / Watch 七项子系统健康度可视化 | ✅ |
 | 📡 ESP-NOW 接收 | 自动匹配 25B `Frame`，非本协议报文静默丢弃 | ✅ |
 | 🛡 协议校验 | CRC-16 校验、magic / 版本校验、seq gap 检测（丢包计数） | ✅ |
-| 🖼 实时渲染 | 按键 / 摇杆 / 旋钮全字段实时刷屏 | ✅ |
+| 🎯 dest_mask 过滤 | 基于 `receiver_id` 的 `dest_mask` 位图寻址过滤 | ✅ |
+| 🔐 Command 控制面 | 接收 24B Command（`0xCB01`）：Announce / AssignId 两路处理 | ✅ |
+| � AnnounceReply | 收到 `Announce` 后广播 `AnnounceReply { mac, role_tag=b"lcd" }` 供手柄发现 | ✅ |
+| 🆔 AssignId | 手柄下发 `AssignId { mac, receiver_id }` 动态分配逻辑 ID（0..=31） | ✅ |
+| 🛡 抗重放窗口 | 64 位滑动窗 `AntiReplayWindow`，防止 Command 重放攻击 | ✅ |
+| �🖼 实时渲染 | 按键 / 摇杆 / 旋钮全字段实时刷屏 | ✅ |
 | 💧 兜底刷新 | 500ms 兜底重绘，永远不会"卡屏" | ✅ |
 | 🔊 声光反馈 | RGB LED / 蜂鸣器状态提示 | 🚧 |
 | 📥 Command 下发 | Host → 手柄反向控制通道 | 🚧 |
@@ -115,8 +120,13 @@
 │                               │
 │     K1 ▓▓▓▓▓▓░░░░  32768      │  ← 双旋钮进度条
 │     K2 ▓▓▓░░░░░░░  16384      │
+│                               │
+│ id=3*  filt=12  rep=2          │  ← 底部 peer 状态行
 └───────────────────────────────┘
 ```
+
+> **底部状态行说明**：`id=N` 为当前 receiver_id，`*` 表示已被手柄 AssignId 分配（`.` 为初始占位），
+> `filt` 为被 dest_mask 过滤的帧数，`rep` 为已发出的 AnnounceReply 次数。
 
 ---
 
@@ -162,33 +172,41 @@ flowchart LR
 
     subgraph Tasks["⚙️ Embassy Tasks"]
         direction TB
-        Recv["🎧 recv_task<br/>ESP-NOW → decode_frame"]
+        Recv["🎧 recv_task<br/>Frame + Command 双路分派"]
         Main["🎨 main loop<br/>select + render"]
     end
 
+    Peer[["🆔 PeerCtx<br/>receiver_id + replay"]]
     Watch[["📬 Watch&lt;ViewModel&gt;"]]
 
-    WIFI ==>|25B Frame| Recv
+    WIFI ==>|25B Frame / 24B Command| Recv
+    Recv -.->|查询/更新| Peer
     Recv ==>|发布| Watch
+    Recv ==>|AnnounceReply| WIFI
     Watch ==>|订阅| Main
     Main ==>|绘制| LCD
 
     classDef hw fill:#ffe4e4,stroke:#e7352c,stroke-width:2px,color:#000
     classDef task fill:#e4efff,stroke:#1a8fe6,stroke-width:2px,color:#000
     classDef pipe fill:#fff8d9,stroke:#c9a227,stroke-width:2px,color:#000
+    classDef peer fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#000
     class WIFI,LCD hw
     class Recv,Main task
     class Watch pipe
+    class Peer peer
 ```
 
 ### 🔄 数据流
 
-1. **`recv_task`** — 常驻协程
-   `EspNowReceiver::receive_async` → `decode_frame` → 更新 `ViewModel` → `Watch::send`
+1. **`recv_task`** — 常驻协程（双路分派）
+   - **Frame 通路**（25B `0xC71E`）：`decode_frame` → `dest_mask` 过滤 → seq gap 检测 → 更新 `ViewModel` → `Watch::send`
+   - **Command 通路**（24B `0xCB01`）：`decode_command` → 抗重放窗口 → `Announce`（广播 `AnnounceReply`）/ `AssignId`（更新 `PeerCtx.receiver_id`）
 2. **主循环** — 双源触发
    `select(Watch.changed(), Timer(500ms))` → `render()` 全屏重绘
 3. **中间通道** — 零拷贝广播
    `embassy_sync::watch::Watch<CriticalSectionRawMutex, ViewModel, 1>`
+4. **PeerCtx** — 控制面上下文
+   存放 `receiver_id`（动态分配）+ `AntiReplayWindow`（64 位滑动窗），纯内存态、重启自愈
 
 ### ⏱ 时序图
 
@@ -197,18 +215,35 @@ sequenceDiagram
     autonumber
     participant Radio as 📡 ESP-NOW HW
     participant Recv as 🎧 recv_task
+    participant Peer as 🆔 PeerCtx
     participant W as 📬 Watch
     participant Main as 🎨 main loop
     participant LCD as 🖥 LCD
 
     loop 常驻监听
-        Radio->>Recv: 25B raw frame
-        Recv->>Recv: decode_frame + CRC/seq check
-        alt 合法
-            Recv->>W: send(ViewModel)
-            W-->>Main: changed()
-            Main->>LCD: render()
-        else 非法
+        Radio->>Recv: raw packet
+        alt magic=0xC71E, len=25B (Frame)
+            Recv->>Recv: decode_frame + CRC check
+            Recv->>Peer: is_addressed_to(receiver_id)?
+            alt dest_mask 命中
+                Recv->>Recv: seq gap 检测
+                Recv->>W: send(ViewModel)
+                W-->>Main: changed()
+                Main->>LCD: render()
+            else dest_mask 未命中
+                Recv-->>Recv: filtered_count++
+            end
+        else magic=0xCB01, len=24B (Command)
+            Recv->>Recv: decode_command + HMAC 校验
+            Recv->>Peer: check_replay(seq)
+            alt Announce
+                Recv->>Radio: 广播 AnnounceReply
+            else AssignId (mac==own)
+                Recv->>Peer: assign(receiver_id)
+            else 其它
+                Recv-->>Recv: 静默忽略
+            end
+        else 其它 magic/长度
             Recv-->>Recv: 静默丢弃
         end
     end
@@ -389,7 +424,9 @@ c6/
 │   │   └── main.rs         # 🚀 顶层：外设初始化 + POST + 主循环
 │   ├── lib.rs              # 模块导出
 │   ├── display.rs          # 🎨 LCD 渲染（ViewModel / render / render_self_test）
-│   ├── radio.rs            # 📡 ESP-NOW 接收 task + Watch 通道类型
+│   ├── peer.rs             # 🆔 Peer 控制面上下文（receiver_id + AntiReplayWindow）
+│   ├── post.rs             # 🩺 POST 自检入口
+│   ├── radio.rs            # 📡 ESP-NOW 接收 task（Frame + Command 双路分派）
 │   ├── sdcard.rs           # 💽 SD 卡 TimeSource / 辅助日志
 │   └── self_test.rs        # 🩺 POST 自检核心
 ├── 📂 tests/
