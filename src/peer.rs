@@ -72,6 +72,12 @@ pub struct PeerCtx {
   replay: AntiReplayWindow,
   /// 是否收到过 `AssignId` 分配。用于在 UI 上区分"初始占位 id"和"已被手柄分配"。
   assigned: bool,
+  /// 是否已经就 HMAC `AuthFailed` 打过一次 `warn!`。用于"首次响亮告警、之后静默"，
+  /// 避免密钥不匹配时刷屏，也避免用户在 `info` 日志级下毫无感知。
+  auth_warned: bool,
+  /// 是否已经就其它 command 解码错误（`BadCrc` / `UnsupportedVersion` / ...）
+  /// 打过一次 `warn!`。首次告警一次，其余走 `debug!`。
+  decode_warned: bool,
 }
 
 impl PeerCtx {
@@ -82,7 +88,31 @@ impl PeerCtx {
       receiver_id: INITIAL_RECEIVER_ID,
       replay: AntiReplayWindow::new(),
       assigned: false,
+      auth_warned: false,
+      decode_warned: false,
     }
+  }
+
+  /// 尝试"消费"一次 HMAC AuthFailed 的首次告警配额：
+  /// 首次返回 `true`（调用方应打 `warn!`），之后一直返回 `false`。
+  pub fn take_auth_warn(&mut self) -> bool {
+    if self.auth_warned {
+      return false;
+    }
+    self.auth_warned = true;
+    true
+  }
+
+  /// 尝试"消费"一次通用 command 解码失败的首次告警配额（`AuthFailed` 除外，
+  /// 那个走 [`take_auth_warn`]）。首次返回 `true`，之后一直返回 `false`。
+  ///
+  /// [`take_auth_warn`]: Self::take_auth_warn
+  pub fn take_decode_warn(&mut self) -> bool {
+    if self.decode_warned {
+      return false;
+    }
+    self.decode_warned = true;
+    true
   }
 
   /// 当前 `receiver_id`（用于 `frame.is_addressed_to(id)` 过滤）。

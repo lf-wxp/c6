@@ -18,14 +18,15 @@
 //! 的 `build.rs` 在编译期从环境变量 `CONTROLLER_SECRET_V1/V2` 注入。
 //!
 //! 如果 `.cargo/config.toml` 里密钥与手柄侧不一致：`decode_command` 会返回 `AuthFailed`，
-//! 本模块**会 debug 记录一次，然后继续跑**——Frame 通路完全不受影响（Frame 不带 HMAC）。
+//! 本模块**首次会以 `warn!` 大声提示一次**（明确告诉你去检查 `CONTROLLER_SECRET_V1/V2`），
+//! 之后就静默走 `debug!`，避免刷屏——Frame 通路完全不受影响（Frame 不带 HMAC）。
 //!
 //! 想临时禁用控制面：把主循环 `match` 中 `COMMAND_LEN` 分支整段跳过即可——Frame 通路
 //! 由独立的 [`handle_frame`] 处理，完全不受影响。
 
 use controller_protocol::{
-  COMMAND_LEN, CommandBody, FRAME_LEN, RESPONSE_LEN, ReplayError, decode_command, decode_frame,
-  encode_response,
+  COMMAND_LEN, CommandBody, CommandDecodeError, FRAME_LEN, RESPONSE_LEN, ReplayError,
+  decode_command, decode_frame, encode_response,
 };
 use defmt::{debug, info, warn};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, watch::Watch};
@@ -74,6 +75,17 @@ pub async fn recv_task(
     "esp-now recv task started, own_mac={:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
     own_mac[0], own_mac[1], own_mac[2], own_mac[3], own_mac[4], own_mac[5]
   );
+
+  // TODO(diagnostic): 密钥指纹，仅打前 4 字节做端到端一致性核对；确认密钥同步后请删除本块
+  {
+    use controller_protocol::config::keyring::{SECRET_V1, SECRET_V2};
+    let v1 = SECRET_V1;
+    let v2 = SECRET_V2;
+    info!(
+      "secret fingerprint: v1_head={:02x}{:02x}{:02x}{:02x} v2_head={:02x}{:02x}{:02x}{:02x}",
+      v1[0], v1[1], v1[2], v1[3], v2[0], v2[1], v2[2], v2[3]
+    );
+  }
 
   loop {
     let pkt = receiver.receive_async().await;
@@ -166,9 +178,28 @@ async fn handle_command(
   let cmd = match decode_command(bytes) {
     Ok(c) => c,
     Err(err) => {
-      // AuthFailed / BadCrc / UnsupportedVersion / ...：静默忽略但打一条 debug
-      // （避免密钥不匹配时刷屏 warn）
-      debug!("command decode error: {:?}", defmt::Debug2Format(&err));
+      // 按错误类型分流：`AuthFailed` 最常见（密钥两侧不一致），单独首次 `warn!`
+      // 提示具体原因；其它错误也在首次发生时 `warn!` 一次，之后统一 `debug!`。
+      // 这样既避免刷屏，又不会让"密钥不匹配"这种关键故障在默认日志级下完全沉默。
+      match err {
+        CommandDecodeError::AuthFailed if peer.take_auth_warn() => {
+          warn!(
+            "command HMAC auth failed — check CONTROLLER_SECRET_V1/V2 match on both sides"
+          );
+        }
+        CommandDecodeError::AuthFailed => {
+          debug!("command decode error: AuthFailed (repeat)");
+        }
+        other if peer.take_decode_warn() => {
+          warn!(
+            "command decode error (first occurrence): {:?}",
+            defmt::Debug2Format(&other)
+          );
+        }
+        other => {
+          debug!("command decode error: {:?}", defmt::Debug2Format(&other));
+        }
+      }
       return;
     }
   };

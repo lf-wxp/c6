@@ -3,8 +3,8 @@ runner = "probe-rs run --chip=esp32c6 --preverify --always-print-stacktrace --no
 
 [env]
 DEFMT_LOG = "info"
-CONTROLLER_SECRET_V1 = "YOUR_32_BYTE_SECRET_KEY_V1_HERE!"
-CONTROLLER_SECRET_V2 = "YOUR_32_BYTE_SECRET_KEY_V2_HERE!"
+CONTROLLER_SECRET_V1 = "VisI12VZPvkPPYJC8YVE5XeCbQjJEUNN"
+CONTROLLER_SECRET_V2 = "roZs4vOynYflSHTJGsHI5kmNGnamB1CB"
 
 [build]
 rustflags = [

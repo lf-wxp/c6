@@ -74,8 +74,16 @@ trouble-host = { version = "0.7.0", features = ["gatt"] }
 critical-section = "1.2.0"
 static_cell = "2.1.1"
 
-# 关掉 embed-default-secrets，强制注入真密钥；仅启用 defmt::Format 集成
-controller-protocol = {git = "https://github.com/lf-wxp/controller", tag = "protocol-v0.2.0", default-features = false, features = ["defmt"]}
+# 关掉 embed-default-secrets，强制注入真密钥；启用 defmt::Format 集成。
+#
+# debug-auth-bypass（仅内网调试！）：
+#   protocol v0.2.0 的 Command/Response HMAC 会混入 session_nonce（K3 特性）。
+#   跨设备 nonce 同步需要接收方"未认证读 NonceHello"，但 v0.2.0 未提供该 API
+#   （官方 receiver-demo 未涉及 Command 通路，host-demo 靠单进程共享全局作弊）。
+#   为解开这个鸡蛋悖论，暂时开启此 feature：verify_hmac_tag 直接返回 true，
+#   c6 侧完全跳过 HMAC 校验（AUTH_ENABLED = false）。手柄侧照常算 HMAC 无需改动。
+#   ⚠️ 生产环境必须移除本 feature。
+controller-protocol = {git = "https://github.com/lf-wxp/controller", tag = "protocol-v0.2.0", default-features = false, features = ["defmt", "debug-auth-bypass"]}
 
 # LCD 驱动（ST7789 / 240x240 SPI 屏，正方形 1.3 寸屏）
 mipidsi = { version = "0.10.0", default-features = false, features = ["defmt"] }
